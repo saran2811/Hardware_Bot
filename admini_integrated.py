@@ -70,10 +70,10 @@ skip_all_notifications = False
 skip_lock = threading.Lock()
 
 # RabbitMQ (keep as you had)
-RABBITMQ_HOST = ""
+RABBITMQ_HOST = "ec2-13-203-69-0.ap-south-1.compute.amazonaws.com"
 RABBITMQ_PORT = 5672
-RABBITMQ_USER = ""
-RABBITMQ_PASS = ""
+RABBITMQ_USER = "admini"
+RABBITMQ_PASS = "Anton@123"
 RABBITMQ_QUEUE = "notification_queue"
 
 # TTS credentials (path)
@@ -97,11 +97,11 @@ N_FFT = 400
 HOP_LENGTH = 160
 
 # Wake thresholds
-THRESHOLD = 0.90
+THRESHOLD = 0.95
 VERY_HIGH_THRESHOLD = 0.95
 REQUIRED_HITS = 1
 HITS_WINDOW = 2
-COOLDOWN = 10.0
+COOLDOWN = 3.0
 
 # Capture exactly 10 seconds after wake
 AFTER_WAKE_RECORD_SECONDS = 10  # 10 seconds after wake
@@ -111,11 +111,13 @@ GPIO.setwarnings(False)
 SERVO_PIN = 13
 SWITCH_PIN = 27
 NOTIFICATION_BUTTON_PIN = 22
+INTERNAL_BUTTON_PIN = 4
 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(SERVO_PIN, GPIO.OUT)
 GPIO.setup(SWITCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(NOTIFICATION_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+GPIO.setup(INTERNAL_BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 servo = GPIO.PWM(SERVO_PIN, 50)
 servo.start(0)
@@ -306,7 +308,7 @@ def speak_text(text, force_language=None, led_color='yellow', enable_skip=False)
         # Configure audio output
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.MP3,
-            volume_gain_db=10.0
+            volume_gain_db=8.0
         )
 
         # Generate speech
@@ -323,7 +325,7 @@ def speak_text(text, force_language=None, led_color='yellow', enable_skip=False)
             # Use chunking for notifications (to enable skip)
             if enable_skip:
                 # Play in chunks of 500ms to check for skip
-                chunk_length = 1000  # milliseconds
+                chunk_length = 2000  # milliseconds
                 for i in range(0, len(audio_segment), chunk_length):
                     # Check skip flags before each chunk
                     with skip_lock:
@@ -397,7 +399,7 @@ def lower_servo():
         if not servo_raised:
             return
         try:
-            set_servo_angle_smooth(180, 0, step=4, delay=0.05)
+            set_servo_angle_smooth(180, 0, step=4, delay=0.01)
             servo_raised = False
             print("[Servo] lowered to 0°")
         except Exception as e:
@@ -530,6 +532,106 @@ def read_notifications_with_skip():
 
     # restore inference pause state
     model_paused = prev_model_paused
+
+
+internal_listen_mode = False
+internal_listen_lock = threading.Lock()
+def internal_listen_loop():
+    """
+    Runs in a background thread while internal_listen_mode is True.
+    Repeatedly captures utterances using capture_until_silence() and processes them
+    with listen_mic_command_from_audio(). Exits when internal_listen_mode becomes False.
+    """
+    global internal_listen_mode, model_paused, _model_paused
+
+    # Save previous model pause state so we can restore it when exiting
+    prev_model_paused = model_paused
+
+    # Request pause of inference and set LED to blue breathing
+    model_paused = True
+    _model_paused = True
+    set_led_mode('blue_breath')
+
+    print("[InternalListen] Started internal listen loop (press button again to stop).")
+
+    try:
+        while True:
+            # Exit condition check
+            with internal_listen_lock:
+                if not internal_listen_mode:
+                    break
+            # capture one utterance (VAD) — adjust timeouts if needed
+            try:
+                audio = capture_until_silence(
+                    speech_threshold=0.015,
+                    silence_threshold=0.01,
+                    min_speech_duration=0.3,
+                    silence_duration=1.5,
+                    max_duration=30.0,
+                    initial_wait_timeout=30.0
+                )
+            except Exception as e:
+                print("[InternalListen] capture_until_silence error:", e)
+                audio = None
+
+            if audio is None or (hasattr(audio, "size") and audio.size == 0):
+                # If nothing was captured, loop back and keep listening until toggled off
+                # small pause to avoid tight loop
+                time.sleep(0.2)
+                continue
+
+            # Process captured audio synchronously using existing pipeline
+            try:
+                print(f"[InternalListen] Captured {len(audio)/MODEL_SR:.2f}s — processing...")
+                listen_mic_command_from_audio(audio)
+            except Exception as e:
+                print("[InternalListen] Error processing audio:", e)
+                # continue listening after errors
+                time.sleep(0.1)
+
+    finally:
+        # Restore prior pause state and LED
+        model_paused = prev_model_paused
+        _model_paused = prev_model_paused
+        set_led_mode('blue_run')
+        print("[InternalListen] Exited internal listen loop.")
+
+def internal_comm_button_monitor():
+    """
+    Monitors INTERNAL_BUTTON_PIN (GPIO4). Short press toggles internal_listen_mode.
+    When turned ON, starts internal_listen_loop() in a background thread.
+    When turned OFF, the loop sees the flag cleared and exits.
+    """
+    global _stop, internal_listen_mode
+
+    pressed = False
+    last_time = 0.0
+    debounce = 0.05
+
+    while not _stop:
+        state = GPIO.input(INTERNAL_BUTTON_PIN) == GPIO.LOW
+        now = time.time()
+        if state and not pressed and (now - last_time) > debounce:
+            # button down
+            pressed = True
+            last_time = now
+        elif not state and pressed:
+            # button released -> toggle
+            pressed = False
+            with internal_listen_lock:
+                internal_listen_mode = not internal_listen_mode
+                new_state = internal_listen_mode
+
+            if new_state:
+                # start listening loop thread
+                print("[InternalBtn] Button pressed — entering internal listen mode.")
+                t = threading.Thread(target=internal_listen_loop, daemon=True)
+                t.start()
+            else:
+                # toggled off: internal_listen_loop will exit on next check
+                print("[InternalBtn] Button pressed — exiting internal listen mode.")
+        time.sleep(0.04)
+
 
 
 def notification_button_press_handler():
@@ -830,6 +932,7 @@ def capture_until_silence(
         
         # Calculate RMS (energy level)
         rms = float(np.sqrt(np.mean(chunk ** 2)))
+        print(f"[VAD] RMS: {rms:.4f}")
         
         # Detect speech start
         if rms > speech_threshold:
@@ -902,7 +1005,7 @@ def chatgpt_chat_mode():
         print("⚠️ Welcome TTS failed:", e)
 
     # OpenRouter settings
-    OPENROUTER_API_KEY = ""
+    OPENROUTER_API_KEY = "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"
     OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
     system_prompt = """You are Admini, a smart Raspberry Pi assistant. You can respond in both English and Tamil.Follow below instructions clearly and strictly.
 
@@ -1435,6 +1538,9 @@ def main():
     threading.Thread(target=notification_button_monitor, daemon=True).start()
     threading.Thread(target=notification_monitor, daemon=True).start()
     threading.Thread(target=notification_button_press_handler, daemon=True).start()
+    threading.Thread(target=internal_comm_button_monitor, daemon=True).start()
+
+
     print("✅ Background threads started")
 
     # start LED thread
