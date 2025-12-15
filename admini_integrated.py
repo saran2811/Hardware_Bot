@@ -70,14 +70,14 @@ skip_all_notifications = False
 skip_lock = threading.Lock()
 
 # RabbitMQ (keep as you had)
-RABBITMQ_HOST = "ec2-13-203-69-0.ap-south-1.compute.amazonaws.com"
+RABBITMQ_HOST = ""
 RABBITMQ_PORT = 5672
-RABBITMQ_USER = "admini"
-RABBITMQ_PASS = "Anton@123"
+RABBITMQ_USER = ""
+RABBITMQ_PASS = ""
 RABBITMQ_QUEUE = "notification_queue"
 
 # TTS credentials (path)
-JSON_CREDENTIALS_PATH = "fast-planet-479910-k9-88fd07aefb58.json"
+JSON_CREDENTIALS_PATH = ""
 
 # Audio capture / wake inference config
 ARECORD_DEVICE = os.environ.get("ARECORD_DEVICE", "hw:3,0")  # set as needed
@@ -1005,7 +1005,7 @@ def chatgpt_chat_mode():
         print("⚠️ Welcome TTS failed:", e)
 
     # OpenRouter settings
-    OPENROUTER_API_KEY = "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"
+    OPENROUTER_API_KEY = ""
     OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
     system_prompt = """You are Admini, a smart Raspberry Pi assistant. You can respond in both English and Tamil.Follow below instructions clearly and strictly.
 
